@@ -8,7 +8,7 @@
 #include "Eigen-3.3/Eigen/Core"
 #include "Eigen-3.3/Eigen/QR"
 #include "json.hpp"
-
+#include "spline.h"
 using namespace std;
 
 // for convenience
@@ -200,11 +200,19 @@ int main() {
   	map_waypoints_dy.push_back(d_y);
   }
 
+  //Starting from middle lane.
+  int lane = 1;
+
+  //Reference velocity.
+  double ref_vel = 0.0; // mph
+  double speed_diff = .224;
+  const double max_accel = 49.5;
+
 #ifdef UWS_VCPKG
-  h.onMessage([&map_waypoints_x, &map_waypoints_y, &map_waypoints_s, &map_waypoints_dx, &map_waypoints_dy](uWS::WebSocket<uWS::SERVER> *ws, char *data, size_t length,
+  h.onMessage([&max_accel, &speed_diff, &ref_vel, &lane, &map_waypoints_x, &map_waypoints_y, &map_waypoints_s, &map_waypoints_dx, &map_waypoints_dy](uWS::WebSocket<uWS::SERVER> *ws, char *data, size_t length,
     uWS::OpCode opCode) {
 #else
-  h.onMessage([&map_waypoints_x, &map_waypoints_y, &map_waypoints_s, &map_waypoints_dx, &map_waypoints_dy](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
+  h.onMessage([&max_accel, &speed_diff, &ref_vel, &lane, &map_waypoints_x, &map_waypoints_y, &map_waypoints_s, &map_waypoints_dx, &map_waypoints_dy](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
     uWS::OpCode opCode) {
 #endif
   
@@ -243,11 +251,204 @@ int main() {
           	// Sensor Fusion Data, a list of all other cars on the same side of the road.
           	auto sensor_fusion = j[1]["sensor_fusion"];
 
-          	json msgJson;
+            int prev_size = previous_path_x.size();
 
-          	vector<double> next_x_vals;
-          	vector<double> next_y_vals;
+            /***
+            Prediction:
+            The prediction component estimates what actions other objects might take in the future. This module has three main
+            Goals: 
+            - Car ahead is too close
+            - Car on the right is too close
+            - Car on the left is too close
+            
+            Assumptions: Only three lanes and each lane has 4 meter width.
 
+            Notes: 
+            - As exception for this highway project we don't have to predict the trajectory of vehicle as vehicles will be
+            travelling in straight line
+            - In real world scenario number of lanes, distance between the lanes and total lanes distance is computed using
+              advance CV techniques
+            ***/
+
+            if (prev_size > 0) {
+              car_s = end_path_s;
+            }
+
+            bool car_left = false;
+            bool car_right = false;
+            bool car_ahead = false;
+            for (int i = 0; i < sensor_fusion.size(); i++) {
+              float d = sensor_fusion[i][6];
+              int check_car_lane = -1;
+
+              if (d > 0 && d < 4) {
+                check_car_lane = 0;
+              }
+              else if (d > 4 && d < 8) {
+                check_car_lane = 1;
+              }
+              else if (d > 8 and d < 12) {
+                check_car_lane = 2;
+              }
+
+              if (check_car_lane < 0) {
+                continue;
+              }
+
+              double vx = sensor_fusion[i][3];
+              double vy = sensor_fusion[i][4];
+              double check_speed = sqrt(vx*vx + vy * vy);
+              double check_car_s = sensor_fusion[i][5];
+
+              // Predict cars postion based on previous
+              check_car_s += ((double)prev_size*0.02*check_speed);
+
+              // Check cars in which lane i.e. within 30 meter range
+              if (check_car_lane == lane) { // A car is on the same lane
+                car_ahead |= check_car_s > car_s && (check_car_s - car_s) < 30;
+              }
+              else if ((check_car_lane - lane) == -1) { // A car is on the left lane
+                car_left |= (car_s + 30) > check_car_s && (car_s - 30) < check_car_s;
+              }
+              else if ((check_car_lane - lane) == 1) { // A car is on the right lane
+                car_right |= (car_s + 30) > check_car_s && (car_s - 30) < check_car_s;
+              }
+            }
+
+            /***
+            Behavior: 
+            This component component determines what behavior/maneuvers the vehicle should exhibit at any point in time e.g. 
+            - Stopping at an intersection or traffic light
+            - Change lane
+            - Accelerate/De-accelerate
+            Note: in real world scenarios this module predict the trajectory based on the cost functions. For this project we only
+            need to consider lane change and speed
+            ***/
+            if (car_ahead) {
+              if (!car_left && lane > 0) {
+                lane--;
+              }
+              else if (!car_right && lane != 2) {
+                lane++;
+              }
+              else if (!car_left && lane != 2) {
+                lane++;
+              }
+              else {
+                ref_vel -= speed_diff;
+              }
+            }
+            else if (ref_vel < max_accel) {
+              ref_vel += speed_diff;
+            }
+
+            /***
+            Trajectory: 
+            This component will determine which trajectory is best for executing desired immediate behavior.
+            ***/
+
+            vector<double> ptsx;
+            vector<double> ptsy;
+
+            double ref_x = car_x;
+            double ref_y = car_y;
+            double ref_yaw = deg2rad(car_yaw);
+
+            // Check If previous states are almost empty, use the car as a starting point
+            if (prev_size < 2) {
+
+              // Derive tengential path
+              double prev_car_x = car_x - cos(car_yaw);
+              double prev_car_y = car_y - sin(car_yaw);
+
+              ptsx.push_back(prev_car_x);
+              ptsx.push_back(car_x);
+
+              ptsy.push_back(prev_car_y);
+              ptsy.push_back(car_y);
+
+            }
+            else {
+
+              // Use previous 2 ref points
+              ref_x = previous_path_x[prev_size - 1];
+              ref_y = previous_path_y[prev_size - 1];
+
+              double ref_x_prev = previous_path_x[prev_size - 2];
+              double ref_y_prev = previous_path_y[prev_size - 2];
+              ref_yaw = atan2(ref_y - ref_y_prev, ref_x - ref_x_prev);
+
+              ptsx.push_back(ref_x_prev);
+              ptsx.push_back(ref_x);
+
+              ptsy.push_back(ref_y_prev);
+              ptsy.push_back(ref_y);
+            }
+
+            // Setting up target points in the future.
+            vector<double> next_wp0 = getXY(car_s + 30, 2 + 4 * lane, map_waypoints_s, map_waypoints_x, map_waypoints_y);
+            vector<double> next_wp1 = getXY(car_s + 60, 2 + 4 * lane, map_waypoints_s, map_waypoints_x, map_waypoints_y);
+            vector<double> next_wp2 = getXY(car_s + 90, 2 + 4 * lane, map_waypoints_s, map_waypoints_x, map_waypoints_y);
+
+            ptsx.push_back(next_wp0[0]);
+            ptsx.push_back(next_wp1[0]);
+            ptsx.push_back(next_wp2[0]);
+
+            ptsy.push_back(next_wp0[1]);
+            ptsy.push_back(next_wp1[1]);
+            ptsy.push_back(next_wp2[1]);
+
+            // Translate coordinates to local car coordinates.
+            for (int i = 0; i < ptsx.size(); i++) {
+              double shift_x = ptsx[i] - ref_x;
+              double shift_y = ptsy[i] - ref_y;
+
+              ptsx[i] = shift_x * cos(0 - ref_yaw) - shift_y * sin(0 - ref_yaw);
+              ptsy[i] = shift_x * sin(0 - ref_yaw) + shift_y * cos(0 - ref_yaw);
+            }
+
+            // Create the spline.
+            tk::spline s;
+            s.set_points(ptsx, ptsy);
+
+            vector<double> next_x_vals;
+            vector<double> next_y_vals;
+
+            // Add previous path points for smooth transition
+            for (int i = 0; i < prev_size; i++) {
+              next_x_vals.push_back(previous_path_x[i]);
+              next_y_vals.push_back(previous_path_y[i]);
+            }
+
+            // Calculate distance y position on 30 m ahead.
+            double target_x = 30.0;
+            double target_y = s(target_x);
+            double target_dist = sqrt(target_x*target_x + target_y * target_y);
+
+            double x_add_on = 0;
+
+            for (int i = 1; i < 50 - prev_size; i++) {
+              double N = target_dist / (0.02*ref_vel / 2.24);
+              double x_point = x_add_on + target_x / N;
+              double y_point = s(x_point);
+
+              x_add_on = x_point;
+
+              double x_ref = x_point;
+              double y_ref = y_point;
+
+              //Rotate back to normal
+              x_point = x_ref * cos(ref_yaw) - y_ref * sin(ref_yaw);
+              y_point = x_ref * sin(ref_yaw) + y_ref * cos(ref_yaw);
+
+              x_point += ref_x;
+              y_point += ref_y;
+
+              next_x_vals.push_back(x_point);
+              next_y_vals.push_back(y_point);
+            }
+
+            json msgJson;
 
           	// TODO: define a path made up of (x,y) points that the car will visit sequentially every .02 seconds
           	msgJson["next_x"] = next_x_vals;
