@@ -1,4 +1,4 @@
-[path_planning]: ./images/path_planning.gif "path_planning"
+[path_planning]: ./images/path_planning_t3.gif "path_planning"
 
 # CarND-Path-Planning-Project
 Self-Driving Car Engineer Nanodegree Program
