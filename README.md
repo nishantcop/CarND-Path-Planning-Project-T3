@@ -76,7 +76,11 @@ This component component determines what behavior/maneuvers the vehicle should e
 - Accelerate/De-accelerate 
 
 ### Trajectory generation [line 346 to line 449](./src/main.cpp#346)
-This component will determine which trajectory is best for executing desired immediate behavior.
+This component will determine which trajectory is best for executing desired immediate behavior. Trajectory generation is based on the output from behavior planning comoponent. That start with previous path points. If previous paths are empty we use car's current point and add them to list (check [line 358 to line 370](./src/main.cpp#358). Otherwise, use last 2 refrence points ([line 371 to line 385](./src/main.cpp#371)).
+
+Now, we add 3 future points and also convert them from fernet coordinate system to global coordinate system via function `getXY()` ([line 388 to line 408](./src/main.cpp#388)). 
+
+For simplification of trajectory generation we have used `spline` and intialize it with `ptsx` and `ptsy` ([line 410 to line 412](./src/main.cpp#410)). We also need to add previous points to `next_x_vals` and `next_y_vals` as this values being passed to simulater and will help smooth transition to the new points ([line 414 to line 421](./src/main.cpp#414)). Next, we need to identify all spline points till 30m ahead (i.e. identify spline y point considering x point is 30) to ensure ego car can travel at required speed ([line 423 to line 426](./src/main.cpp#423)). Finally, we calculate 50 points for target destination. This includes 3 future points and 47 previous points ([line 430 to line 449](./src/main.cpp#430))
 
 ### Final Result
 
